@@ -1,0 +1,28 @@
+{
+  "1": {
+    "ip": "127.0.0.1",
+    "producePort": 9000,
+    "consumerPort": 10000,
+    "replicaPort": 11000,
+    "replicas": ["2", "3"]
+  },
+  "2": {
+    "ip": "127.0.0.1",
+    "producePort": 9001,
+    "consumerPort": 10001,
+    "replicaPort": 11001,
+    "replicas": ["3", "1"]
+  },
+  "3": {
+    "ip": "127.0.0.1",
+    "producePort": 9002,
+    "consumerPort": 10002,
+    "replicaPort": 11002,
+    "replicas": ["1", "2"]
+  },
+  "topics": {
+    "1": {
+      "replicationFactor": 3
+    }
+  }
+}

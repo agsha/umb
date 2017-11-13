@@ -1,0 +1,204 @@
+package umb.client;
+
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.google.inject.Guice;
+import com.google.inject.Injector;
+import com.google.inject.util.Modules;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import sha.Utils;
+import umb.common.UmbSocketChannel;
+import umb.guice.UmbInjector;
+import umb.guice.UmbModule;
+import umb.testing.MockUmbSocketChannelImpl;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static umb.common.Helper.IpPort;
+
+public class UmbClient2 {
+    private static final Logger log = LoggerFactory.getLogger(UmbClient2.class);
+    private final int connections;
+    JsonNode config;
+
+    ArrayList<IpPort> brokers = new ArrayList<>();
+    ArrayBlockingQueue<UmbSocketChannel> socketChannels ;
+    public static final int batchSize = 1024; // network batch size
+    volatile boolean shutdown = false;
+    AtomicInteger messageId = new AtomicInteger();
+    public UmbClient2(int connections) {
+        config = Utils.readJsonFromClasspath("config.json", JsonNode.class);
+        this.connections = connections;
+        // keep the queue length small to avoid queueing delays
+        ArrayNode brokersConfig = (ArrayNode)config.get("brokers");
+        socketChannels = new ArrayBlockingQueue<>(connections);
+        for(int i=0; i<brokersConfig.size(); i++) {
+            String[] split = brokersConfig.get(i).asText().split(":");
+            brokers.add(new IpPort(split[0], Integer.parseInt(split[1])));
+        }
+        startConnections();
+    }
+
+    private void startConnections() {
+        CountDownLatch latch = new CountDownLatch(connections);
+
+        for(int i = 0; i< connections; i++) {
+            long id = (long)i << 54;
+            IpPort ipPort = brokers.get(connections % brokers.size());
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        doConnect(ipPort, id, latch);
+                    } catch (Exception e) {
+                        log.error("something went wrong?", e);
+                    }
+                }
+            });
+            t.start();
+        }
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+
+    }
+
+    private void doConnect(IpPort ipPort, long id, CountDownLatch latch) throws InterruptedException {
+        UmbSocketChannel socketChannel = UmbInjector.injector.getInstance(UmbSocketChannel.class);
+        try {
+            log.debug("connecting to {}:{}", ipPort.ip, ipPort.port);
+            socketChannel.connect(new InetSocketAddress(ipPort.ip, ipPort.port));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        socketChannels.put(socketChannel);
+        latch.countDown();
+    }
+
+
+    public void produce(byte[] ba) throws InterruptedException, IOException {
+        UmbSocketChannel socketChannel = socketChannels.take();
+        long id = messageId.incrementAndGet();
+        UmbFuture f = new UmbFuture();
+        UmbMessage message = new UmbMessage(ba, f);
+        if(ba.length < batchSize / 2) {
+            smallMessage(ba);
+        }
+
+        ByteBuffer header = ByteBuffer.allocate(12);
+        ByteBuffer ack = ByteBuffer.allocate(8);
+
+        // 8 byte message id + 4 bytes message length
+        header.clear();
+        header.putLong(id);
+        header.putInt(message.payload.length);
+        ByteBuffer[] toSend = new ByteBuffer[2];
+        toSend[0] = header;
+        toSend[1] = ByteBuffer.wrap(message.payload);
+        socketChannel.write(toSend, 0, 1);
+
+        ack.clear();
+        while(ack.remaining() > 0) {
+            socketChannel.read(ack);
+        }
+        if(ack.getLong(0) != id) {
+            throw new RuntimeException(String.format("ack mismatch! expected %d, got %d", id, ack.getLong(0)));
+        }
+        socketChannels.put(socketChannel);
+    }
+
+    private Future<Void> smallMessage(byte[] ba) {
+        throw new RuntimeException("unimplemented");
+    }
+
+
+    public static class UmbFuture implements Future<Void> {
+        CountDownLatch latch = new CountDownLatch(1);
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            return false;
+        }
+
+        @Override
+        public boolean isCancelled() {
+            return false;
+        }
+
+        @Override
+        public boolean isDone() {
+            return latch.getCount() == 0;
+        }
+
+        @Override
+        public Void get() throws InterruptedException, ExecutionException {
+            latch.await();
+            return null;
+        }
+
+        @Override
+        public Void get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+            latch.await(timeout, unit);
+            return null;
+        }
+    }
+
+
+    public static class UmbMessage {
+        byte[] payload;
+
+
+        public UmbMessage(byte[] payload, UmbFuture f) {
+            this.payload = payload;
+        }
+    }
+
+
+    /**
+     * Testing code
+     */
+    public static void main(String[] args) {
+        try {
+            test1();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * results of the test: max:612.48us 99.9%:36us 99.0%:20us 95.0%:11us 90.0%:10us 75.0%:10us 50.0%:9us 1.0%:9us  count:107000
+     * @throws InterruptedException
+     * @throws ExecutionException
+     */
+    public static void test1() throws InterruptedException, ExecutionException, IOException {
+        class MyModule extends UmbModule {
+            @Override
+            protected void configure() {
+                bind(UmbSocketChannel.class).to(MockUmbSocketChannelImpl.class);
+            }
+        }
+        Injector injector = Guice.createInjector(Modules.override(new UmbModule()).with(new MyModule()));
+        UmbInjector.injector = injector;
+        System.out.println(UmbInjector.injector.getInstance(UmbSocketChannel.class));
+        UmbClient2 c = new UmbClient2(1);
+        byte[] b = new byte[1024];
+        Utils.LatencyTimer t = new Utils.LatencyTimer();
+        int i=0;
+        while(true) {
+            c.produce(b);
+            t.count();
+        }
+    }
+}
