@@ -128,7 +128,7 @@ public class UmbClient {
     }
 
 
-    public Future<Void> produce(byte[] ba) throws InterruptedException {
+    public Future<Void> produce(int topic, byte[] ba) throws InterruptedException {
         UmbFuture f = new UmbFuture();
         UmbMessage message = new UmbMessage(ba, f);
         if(ba.length < batchSize / 2) {
@@ -223,7 +223,7 @@ public class UmbClient {
         Utils.LatencyTimer t = new Utils.LatencyTimer();
         int i=0;
         while(true) {
-            Future<Void> future = c.produce(b);
+            Future<Void> future = c.produce(1, b);
             future.get();
             t.count();
         }

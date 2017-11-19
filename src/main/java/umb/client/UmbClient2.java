@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Random;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -33,8 +34,8 @@ public class UmbClient2 {
     public static final int batchSize = 1024; // network batch size
     volatile boolean shutdown = false;
     AtomicInteger messageId = new AtomicInteger();
-    public UmbClient2(int connections) {
-        config = Utils.readJsonFromClasspath("config.json", JsonNode.class);
+    public UmbClient2(int connections, String conf) throws InterruptedException {
+        config = Utils.readJsonFromClasspath(conf, JsonNode.class);
         this.connections = connections;
         // keep the queue length small to avoid queueing delays
         ArrayNode brokersConfig = (ArrayNode)config.get("brokers");
@@ -46,7 +47,7 @@ public class UmbClient2 {
         startConnections();
     }
 
-    private void startConnections() {
+    private void startConnections() throws InterruptedException {
         CountDownLatch latch = new CountDownLatch(connections);
 
         for(int i = 0; i< connections; i++) {
@@ -63,6 +64,7 @@ public class UmbClient2 {
                 }
             });
             t.start();
+            Thread.sleep(5);
         }
         try {
             latch.await();
@@ -85,33 +87,37 @@ public class UmbClient2 {
     }
 
 
-    public void produce(byte[] ba) throws InterruptedException, IOException {
+    public void produce(int topic, byte[] ba) throws InterruptedException, IOException {
         UmbSocketChannel socketChannel = socketChannels.take();
         long id = messageId.incrementAndGet();
         UmbFuture f = new UmbFuture();
         UmbMessage message = new UmbMessage(ba, f);
-        if(ba.length < batchSize / 2) {
-            smallMessage(ba);
-        }
+//        if(ba.length < batchSize / 2) {
+//            smallMessage(ba);
+//        }
 
-        ByteBuffer header = ByteBuffer.allocate(12);
-        ByteBuffer ack = ByteBuffer.allocate(8);
+        ByteBuffer header = ByteBuffer.allocate(8);
+        ByteBuffer ack = ByteBuffer.allocate(1);
 
         // 8 byte message id + 4 bytes message length
         header.clear();
-        header.putLong(id);
-        header.putInt(message.payload.length);
+        header.putInt(0, 1);
+        header.putInt(4, message.payload.length);
         ByteBuffer[] toSend = new ByteBuffer[2];
         toSend[0] = header;
         toSend[1] = ByteBuffer.wrap(message.payload);
-        socketChannel.write(toSend, 0, 1);
+//        log.debug("before write");
+        //TODO, put the remaining count here.
+        socketChannel.write(toSend, 0, 2);
 
         ack.clear();
         while(ack.remaining() > 0) {
             socketChannel.read(ack);
         }
-        if(ack.getLong(0) != id) {
-            throw new RuntimeException(String.format("ack mismatch! expected %d, got %d", id, ack.getLong(0)));
+//        log.debug("after ack");
+
+        if(ack.get(0) != 1) {
+            throw new RuntimeException(String.format("ack mismatch! expected %d, got %d", id, ack.get(0)));
         }
         socketChannels.put(socketChannel);
     }
@@ -166,15 +172,61 @@ public class UmbClient2 {
      * Testing code
      */
     public static void main(String[] args) {
+        realMain(args);
+//        test1(args);
+    }
+
+    static void realMain(String[] args) {
+        int conn = 1;
+        String conf = "config.json";
+        int ii = 0;
+        while(ii < args.length) {
+            if(args[ii].equals("conn")) {
+                conn = Integer.parseInt(args[ii+1]);
+            } else if(args[ii].equals("conf")) {
+                conf = args[ii+1];
+            }
+            ii+=2;
+        }
+
         try {
-            test1();
+            UmbClient2 client = new UmbClient2(conn, conf);
+            Random random = new Random();
+            Utils.LatencyTimer t = new Utils.LatencyTimer();
+            int c = 0;
+            int len = 1*1024;
+            byte[]b =  new byte[len];
+            for(int j=0; j<b.length; j++) {
+                b[j] = (byte)random.nextInt();
+            }
+
+            for (int i = 0; i < conn; i++) {
+                Thread tt = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        while (true) {
+                            try {
+                                client.produce(1, b);
+                            } catch (InterruptedException | IOException e) {
+                                e.printStackTrace();
+                            }
+                            t.count();
+                        }
+                    }
+                });
+                tt.start();
+            }
+
         } catch (InterruptedException e) {
             e.printStackTrace();
-        } catch (ExecutionException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
+        }
+
+        try {
+            Thread.sleep(60_000);
+        } catch (InterruptedException e) {
             e.printStackTrace();
         }
+        System.exit(0);
     }
 
     /**
@@ -182,23 +234,71 @@ public class UmbClient2 {
      * @throws InterruptedException
      * @throws ExecutionException
      */
-    public static void test1() throws InterruptedException, ExecutionException, IOException {
-        class MyModule extends UmbModule {
-            @Override
-            protected void configure() {
-                bind(UmbSocketChannel.class).to(MockUmbSocketChannelImpl.class);
+    public static void test1(String[] args) {
+        try {
+            int conn = 1;
+            String conf = "config.json";
+            int ii = 0;
+            while(ii < args.length) {
+                if(args[ii].equals("conn")) {
+                    conn = Integer.parseInt(args[ii+1]);
+                } else if(args[ii].equals("conf")) {
+                    conf = args[ii+1];
+                }
+                ii+=2;
             }
-        }
-        Injector injector = Guice.createInjector(Modules.override(new UmbModule()).with(new MyModule()));
-        UmbInjector.injector = injector;
-        System.out.println(UmbInjector.injector.getInstance(UmbSocketChannel.class));
-        UmbClient2 c = new UmbClient2(1);
-        byte[] b = new byte[1024];
-        Utils.LatencyTimer t = new Utils.LatencyTimer();
-        int i=0;
-        while(true) {
-            c.produce(b);
-            t.count();
+            conn = 1;
+
+            class MyModule extends UmbModule {
+                @Override
+                protected void configure() {
+                    bind(UmbSocketChannel.class).to(MockUmbSocketChannelImpl.class);
+                }
+            }
+            Injector injector = Guice.createInjector(Modules.override(new UmbModule()).with(new MyModule()));
+            UmbInjector.injector = injector;
+            System.out.println(UmbInjector.injector.getInstance(UmbSocketChannel.class));
+
+            try {
+                UmbClient2 client = new UmbClient2(conn, conf);
+                Random random = new Random();
+                Utils.LatencyTimer t = new Utils.LatencyTimer();
+                int c = 0;
+                int len = 1*1024;
+                byte[]b =  new byte[len];
+                for(int j=0; j<b.length; j++) {
+                    b[j] = (byte)random.nextInt();
+                }
+
+                for (int i = 0; i < conn; i++) {
+                    Thread tt = new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            while (true) {
+                                try {
+                                    client.produce(1, b);
+                                } catch (InterruptedException | IOException e) {
+                                    e.printStackTrace();
+                                }
+                                t.count();
+                            }
+                        }
+                    });
+                    tt.start();
+                }
+
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
+            try {
+                Thread.sleep(60_000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            System.exit(0);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 }

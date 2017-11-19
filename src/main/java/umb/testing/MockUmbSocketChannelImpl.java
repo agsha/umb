@@ -36,8 +36,8 @@ public class MockUmbSocketChannelImpl implements UmbSocketChannel {
 
     @Override
     public int read(ByteBuffer dst) throws IOException {
-        dst.putLong(messageId);
-        return 8;
+        dst.put((byte)1);
+        return 1;
     }
 
     @Override

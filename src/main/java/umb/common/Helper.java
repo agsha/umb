@@ -11,6 +11,8 @@ import java.util.concurrent.ArrayBlockingQueue;
 public class Helper {
     // four bytes topic and 4 bytes len (excluding the 4 bytes of len itself)
     public static final int HEADER_LEN = 8;
+    public static final int BUF_SZ = 1024;
+    public static final int OS_MESSAGE_CACHE_SIZE = 10;
 
     public static class IpPort {
         public String ip;
@@ -23,8 +25,8 @@ public class Helper {
     }
 
     public static class ServerThreadShared {
-        public ArrayBlockingQueue<SocketChannel> newProducerConnections = new ArrayBlockingQueue<>(100);
-        public ArrayBlockingQueue<SocketChannel> newReplicaConnections = new ArrayBlockingQueue<>(100);
+        public ArrayBlockingQueue<SocketChannel> newProducerConnections = new ArrayBlockingQueue<>(10000);
+        public ArrayBlockingQueue<SocketChannel> newReplicaConnections = new ArrayBlockingQueue<>(10000);
     }
 
 
@@ -77,12 +79,18 @@ public class Helper {
          */
         public int len = 0;
         public int read = 0;
-        public ByteBuffer[] osMessageCache = new ByteBuffer[1024];
+        public ByteBuffer[] osMessageCache = new ByteBuffer[OS_MESSAGE_CACHE_SIZE];
         public ByteBuffer[] osMessage;
         public ByteBuffer current;
         public int readNow = 0;
         public HeaderState stateNow = HeaderState.HDR_INCOMPLETE;
         public int count = 0;
+        public int offset = 0;
+
+
+        public boolean reading = true;
+        public int written = 0;
+        public int writtenNow = 0;
 
         public MessageState(int headerLen) {
             header = ByteBuffer.allocate(headerLen);
@@ -90,6 +98,11 @@ public class Helper {
             message.add(current);
         }
 
+        @Override
+        public String toString() {
+            return String.format("MessageState{" +
+                    "offset=%d, position=%d, limit=%d }", offset, message.getFirst().position(), message.getFirst().limit());
+        }
 
         public enum HeaderState {
             HDR_INCOMPLETE, HDR_JUST_FULL, HDR_ALREADY_FULL, MSG_COMPLETE, MSG_INCOMPLETE, INVALID
@@ -103,15 +116,22 @@ public class Helper {
         public ServerThreadState threadState;
         public MessageState msgState = new MessageState(HEADER_LEN);
 
-        public ProduceState(int remaining, int topic, SocketChannel sc, ServerThreadState threadState) {
-            this.topic = topic;
+        public ProduceState(SocketChannel sc, ServerThreadState threadState) {
             this.sc = sc;
             this.threadState = threadState;
         }
     }
 
     public static class ReplicaConsumeState {
-        SocketChannel sc;
+        public Integer topic = 0;
+        public SocketChannel sc;
+        public ServerThreadState threadState;
+        public MessageState msgState = new MessageState(HEADER_LEN);
+
+        public ReplicaConsumeState(SocketChannel sc, ServerThreadState threadState) {
+            this.sc = sc;
+            this.threadState = threadState;
+        }
     }
     public static class ReplicaProduceState {
         SocketChannel sc;
