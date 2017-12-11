@@ -4,15 +4,13 @@ import java.nio.ByteBuffer;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 
-public class Helper {
+public class Helper3 {
     // four bytes topic and 4 bytes len (excluding the 4 bytes of len itself)
-    public static final int HEADER_LEN = 8;
-    public static final int BUF_SZ = 40000;
-    public static final int OS_MESSAGE_CACHE_SIZE = 10;
+    public static int BUF_SZ = 20480;
+    public static final int ACK_SZ = 8;
 
     public static class IpPort {
         public String ip;
@@ -39,7 +37,6 @@ public class Helper {
         List<ReplicaConsumeState> replicaConsumeStates = new ArrayList<>();
         List<ReplicaProduceState> replicaProduceStates = new ArrayList<>();
         public List<SocketChannel> replicas = new ArrayList<>();
-        public ByteBuffer replicaReply = ByteBuffer.allocate(1);
 
         public ServerThreadState(Selector selector, long hundredMillis, long now, ServerThreadShared shared) {
             this.selector = selector;
@@ -71,50 +68,20 @@ public class Helper {
     }
 
     public static class MessageState {
-        public ByteBuffer header;
-        public LinkedList<ByteBuffer> message = new LinkedList<>();
         /*
         len is the message length
         read is the amount of bytes of the current message read until now
          */
-        public int len = 0;
-        public int read = 0;
-        public ByteBuffer[] osMessageCache = new ByteBuffer[OS_MESSAGE_CACHE_SIZE];
-        public ByteBuffer[] osMessage;
-        public ByteBuffer current;
-        public int readNow = 0;
-        public HeaderState stateNow = HeaderState.HDR_INCOMPLETE;
-        public int count = 0;
-        public int offset = 0;
-
-
-        public boolean reading = true;
-        public int written = 0;
-        public int writtenNow = 0;
-
-        public MessageState(int headerLen) {
-            header = ByteBuffer.allocate(headerLen);
-            current = ByteBuffer.allocate(BUF_SZ);
-            message.add(current);
-        }
-
-        @Override
-        public String toString() {
-            return String.format("MessageState{" +
-                    "offset=%d, position=%d, limit=%d }", offset, message.getFirst().position(), message.getFirst().limit());
-        }
-
-        public enum HeaderState {
-            HDR_INCOMPLETE, HDR_JUST_FULL, HDR_ALREADY_FULL, MSG_COMPLETE, MSG_INCOMPLETE, INVALID
-        }
+        public ByteBuffer current = ByteBuffer.allocate(BUF_SZ);
+        public ByteBuffer replicaReply = ByteBuffer.allocate(ACK_SZ);
     }
 
 
     public static class ProduceState {
-        public Integer topic = 0;
+        public Integer topic = 3;
         public SocketChannel sc;
         public ServerThreadState threadState;
-        public MessageState msgState = new MessageState(HEADER_LEN);
+        public MessageState msgState = new MessageState();
 
         public ProduceState(SocketChannel sc, ServerThreadState threadState) {
             this.sc = sc;
@@ -123,10 +90,10 @@ public class Helper {
     }
 
     public static class ReplicaConsumeState {
-        public Integer topic = 0;
+        public Integer topic = 3;
         public SocketChannel sc;
         public ServerThreadState threadState;
-        public MessageState msgState = new MessageState(HEADER_LEN);
+        public MessageState msgState = new MessageState();
 
         public ReplicaConsumeState(SocketChannel sc, ServerThreadState threadState) {
             this.sc = sc;

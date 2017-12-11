@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import sha.Utils;
 import umb.client.UmbClient2;
+import umb.common.Helper3;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -18,11 +19,10 @@ import java.nio.channels.SocketChannel;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 
-import static umb.common.Helper.*;
-import static umb.common.Helper.MessageState.HeaderState.*;
+import static umb.common.Helper3.*;
 
-public class UmbServer {
-    private static final Logger log = LoggerFactory.getLogger(UmbServer.class);
+public class UmbServer3 {
+    private static final Logger log = LoggerFactory.getLogger(UmbServer3.class);
     private JsonNode config;
     private String id;
     private int producePort;
@@ -36,8 +36,9 @@ public class UmbServer {
     private final List<ServerThreadShared> serverThreadShareds;
     HashMap<Integer, Integer> topicToReplicationFactor = new HashMap<>();
     CountDownLatch readyLatch = new CountDownLatch(2);
+    private int msg;
 
-    public UmbServer(String[] args) {
+    public UmbServer3(String[] args) {
         String conf = "config.json";
         int ii=0;
         while(ii < args.length) {
@@ -45,6 +46,8 @@ public class UmbServer {
                 conf = args[ii+1];
             } else if(args[ii].equals("id")) {
                 id = (args[ii+1]);
+            } else if(args[ii].equals("msg")) {
+                msg = Integer.parseInt(args[ii+1]);
             }
             ii+=2;
         }
@@ -56,6 +59,7 @@ public class UmbServer {
         consumerPort = myConfig.get("consumerPort").asInt();
         replicaPort = myConfig.get("replicaPort").asInt();
         threads = myConfig.get("numServerThreads").asInt();
+        Helper3.BUF_SZ = msg;
 
         ii=0;
         while(ii < args.length) {
@@ -66,9 +70,6 @@ public class UmbServer {
             }
             ii+=2;
         }
-
-
-
 
         topicMetadata(config);
         serverThreads = new ArrayList<>();
@@ -158,179 +159,51 @@ public class UmbServer {
 
     private void processProducer(ProduceState ps) throws IOException, AppException, InterruptedException {
         // start reading messages
+        MessageState state = ps.msgState;
+        ByteBuffer current = state.current;
         while(true) {
-            processHeader(ps.msgState, ps.sc);
-
-            if(ps.msgState.stateNow == HDR_JUST_FULL) {
-                ps.topic = ps.msgState.header.getInt(0);
-
-            } else if (ps.msgState.stateNow == HDR_INCOMPLETE) {
-                if(ps.msgState.readNow == 0) {
-                    return;
-                }
-            } else if (ps.msgState.stateNow == HDR_ALREADY_FULL){
-
-                processBody(ps.msgState, ps.sc);
-                if(ps.msgState.stateNow == INVALID) {
-                    throw new AppException("Shouldnt be invalid");
-                }
-                if(ps.msgState.stateNow == MSG_INCOMPLETE && ps.msgState.readNow == 0) {
-                    return;
-                }
-                if(ps.msgState.stateNow == MSG_COMPLETE) {
-//                    log.debug("got full message. replicating now");
-                    doReplicationAndAck(ps);
-//                    log.debug("before reset: {}", ps.msgState);
-                    resetMsgState(ps.msgState);
-//                    log.debug("after reset: {}", ps.msgState);
-//                    log.debug("");
-//                    log.debug("");
-//                    log.debug("");
-                    return;
-                }
-            } else {
-                throw new AppException("invalid return code");
+            int readNow = ps.sc.read(current);
+            if(readNow == 0) {
+                break;
             }
         }
-    }
-
-    private void resetMsgState(MessageState ms) throws AppException {
-        ms.count = 0;
-        ms.stateNow = INVALID;
-        ms.readNow = 0;
-        ms.read = 0;
-        // release the memory
-        ms.osMessage = null;
-        ms.header.clear();
-        if(ms.message.size() != 1) {
-            throw new AppException("Something is wrong: linked list size should be 1");
-        }
-        ByteBuffer bb = ms.message.getFirst();
-        ms.offset = 0;
-        if(bb.limit() < bb.capacity()) {
-            ms.offset = bb.limit();
-            bb.position(bb.limit());
-            bb.limit(bb.capacity());
-        }
-    }
-
-
-    private void flipMsgState(MessageState ms) {
-        ms.header.clear();
-        ms.osMessage[1].position(ms.offset);
-        for(int i=2; i<ms.count; i++) {
-            ms.osMessage[i].position(0);
-        }
-    }
-
-    private void processHeader(MessageState ms, SocketChannel sc) throws IOException {
-        ms.stateNow = INVALID;
-        ms.readNow = 0;
-        if(ms.header.remaining() == 0) {
-            ms.stateNow = HDR_ALREADY_FULL;
-            return;
-        }
-
-        ms.readNow = sc.read(ms.header);
-        if(ms.header.remaining() == 0) {
-            ms.len = ms.header.getInt(4);
-            ms.stateNow = HDR_JUST_FULL;
-            ByteBuffer bb = ms.message.getFirst();
-            if(ms.len < bb.remaining()) {
-                bb.limit(bb.position()+ms.len);
-            }
-            return;
-        }
-        ms.stateNow = HDR_INCOMPLETE;
-    }
-
-    /**
-     *
-     * @return true if a message was processed
-     * @throws IOException
-     * @throws AppException
-     */
-    private void processBody(MessageState ms, SocketChannel sc) throws IOException, AppException {
-        ms.stateNow = INVALID;
-        ms.readNow = 0;
-
-        // it is guaranteed that there will be at least one byte free in current,
-        // so readNow can never be zero coz of no free space in user-space buffer.
-        // it can be zero only coz data is unavailable in socket buffer.
-        ms.readNow = sc.read(ms.current);
-        ms.read += ms.readNow;
-        if(ms.read == ms.len) {
-            ms.stateNow = MSG_COMPLETE;
-        } else {
-            ms.stateNow = MSG_INCOMPLETE;
-        }
-        ByteBuffer current = ms.current;
-
-        // enforce the free space guarantee
         if(current.remaining() == 0) {
-            ms.current = ByteBuffer.allocate(BUF_SZ);
-            ms.message.addLast(ms.current);
-            if(ms.read + BUF_SZ > ms.len) {
-                // if the buffer is greater than len, then restrict the current buffer size
-                ms.current.limit(ms.len - ms.read);
-            }
-        }
-
-        if(ms.stateNow == MSG_COMPLETE) {
-            ms.osMessage = null;
-            //TODO dont forget to keep the invariant that there is always a non full buffer in ps.message.
-            // i.e., if the message happened to fill exactly the "current" bytebuffer, then allocate a new one.
-            LinkedList<ByteBuffer> message = ms.message;
-            ByteBuffer[] osMessage = ms.osMessageCache;
-            if(message.size() + 1 > osMessage.length) { // the +1 for the header
-//                log.warn("got a huge message. Allocating a new array");
-                osMessage = new ByteBuffer[message.size()+1];
-            }
-            ms.osMessage = osMessage;
-            int count = 0;
-            osMessage[count++] = ms.header;
-
-            // all but last
-            while(message.size()>0) {
-                osMessage[count++] = message.removeFirst();
-            }
-
-            // count is always at least one by the non full buffer invariant
-            ByteBuffer bb = osMessage[count-1];
-
-            if(bb.limit() < bb.capacity()) {
-                message.add(bb);
-            } else {
-                message.add(ByteBuffer.allocate(BUF_SZ));
-            }
-
-            ms.count = count;
+//            log.debug("finished getting message, now replicating");
+            doReplicationAndAck(ps);
+            current.clear();
         }
     }
+
+
 
     private void doReplicationAndAck(ProduceState ps) throws IOException, AppException, InterruptedException {
+        MessageState state = ps.msgState;
+        ByteBuffer current = state.current;
+
 //        log.debug("came to replicate!");
         int replicationFactor = topicToReplicationFactor.get(ps.topic);
         establishReplicaConnections(ps, replicationFactor);
         for(int i=0; i<replicationFactor; i++) {
             SocketChannel sc = ps.threadState.replicas.get(i);
-            flipMsgState(ps.msgState);
+            current.clear();
 //            if(!validateMessage(ps.msgState)) {
 //                log.error("found an invalid message: {}", Arrays.toString(message));
 //            }
-            long writtenNow = 0;
-            while(writtenNow!=ps.msgState.len+HEADER_LEN) {
-                writtenNow += sc.write(ps.msgState.osMessage, 0, ps.msgState.count);
+            while(current.remaining() > 0) {
+//                log.debug("{} came to write: remaining:{}", i, current.remaining());
+                sc.write(current);
             }
-//            log.debug("{} wrote to replicas: {}", i, written);
+//            log.debug("{} wrote to replicas", i);
         }
 //        log.debug("finished sending tp replicas");
-        ByteBuffer bb = ps.threadState.replicaReply;
+        ByteBuffer bb = state.replicaReply;
         for(int i=0; i<replicationFactor; i++) {
             SocketChannel sc = ps.threadState.replicas.get(i);
             bb.clear();
             bb.put(0, (byte)0);
-            sc.read(bb);
+            while(bb.remaining() > 0) {
+                sc.read(bb);
+            }
             if(bb.get(0) != 1) {
                 throw new AppException();
             }
@@ -344,7 +217,6 @@ public class UmbServer {
             ps.sc.write(bb);
         }
 //        log.debug("finished writing ack back to client");
-        flipMsgState(ps.msgState);
 //        StringBuilder s = new StringBuilder("Header bytes:");
 //        s.append(ps.msgState.header.getInt(0)).append(", ").append(ps.msgState.header.getInt(4)).append(" Body bytes: ");
 //        for(int i=1; i<ps.msgState.count; i++) {
@@ -357,18 +229,18 @@ public class UmbServer {
 //        log.debug(s.toString());
     }
 
-    private boolean validateMessage(MessageState msgState) {
-        ByteBuffer[] osMessage = msgState.osMessage;
-        int count = 0;
-        for(int i=1; i<msgState.count; i++) {
-            for(int j=osMessage[i].position(); j<osMessage[i].limit(); j++) {
-                if(message[count++]!=osMessage[i].get(j)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
+//    private boolean validateMessage(MessageState msgState) {
+//        ByteBuffer[] osMessage = msgState.osMessage;
+//        int count = 0;
+//        for(int i=1; i<msgState.count; i++) {
+//            for(int j=osMessage[i].position(); j<osMessage[i].limit(); j++) {
+//                if(message[count++]!=osMessage[i].get(j)) {
+//                    return false;
+//                }
+//            }
+//        }
+//        return true;
+//    }
 
 
     private void establishReplicaConnections(ProduceState ps, int replicationFactor) throws IOException, InterruptedException {
@@ -394,47 +266,24 @@ public class UmbServer {
 
     private void processReplicaConsumer(ReplicaConsumeState rs) throws IOException, AppException {
         // start reading messages
+        MessageState state = rs.msgState;
+        ByteBuffer current = state.current;
+
         while(true) {
-            processHeader(rs.msgState, rs.sc);
-            if(rs.msgState.stateNow == HDR_JUST_FULL) {
-                rs.topic = rs.msgState.header.getInt(0);
-            } else if (rs.msgState.stateNow == HDR_INCOMPLETE) {
-                if(rs.msgState.readNow == 0) {
-                    return;
-                }
-            } else if (rs.msgState.stateNow == HDR_ALREADY_FULL){
-                processBody(rs.msgState, rs.sc);
-//                if(id.equals("2")) log.debug("replica readNow:{} read:{}", rs.msgState.readNow, rs.msgState.read);
-                if(rs.msgState.stateNow == INVALID) {
-                    throw new AppException("Shouldnt be invalid");
-                }
-                if(rs.msgState.stateNow == MSG_INCOMPLETE && rs.msgState.readNow == 0) {
-                    return;
-                }
-                if(rs.msgState.stateNow == MSG_COMPLETE) {
-//                    log.debug("replica: got message!");
-                    replicaAck(rs);
-                    resetMsgState(rs.msgState);
-                    return;
-                }
-            } else {
-                throw new AppException("invalid return code");
+            int readNow = rs.sc.read(current);
+            if(readNow == 0) break;
+        }
+        if(current.remaining() == 0) {
+            ByteBuffer replicaReplyRecv = state.replicaReply;
+            replicaReplyRecv.clear();
+            replicaReplyRecv.put(0, (byte)1);
+            while(replicaReplyRecv.remaining() > 0) {
+                rs.sc.write(replicaReplyRecv);
             }
-        }
-
-    }
-
-    private void replicaAck(ReplicaConsumeState rs) throws IOException {
-//        if(!validateMessage(rs.msgState)) {
-//            log.error("found an invalid message: {}", Arrays.toString(message));
-//        }
-        ByteBuffer replicaReply = rs.threadState.replicaReply;
-        replicaReply.put(0, (byte)1);
-        replicaReply.clear();
-        while(replicaReply.remaining() > 0) {
-            rs.sc.write(replicaReply);
+            current.clear();
         }
     }
+
 
     private void processNewConns(ServerThreadState state) throws IOException {
         long now = state.now;
@@ -492,15 +341,15 @@ public class UmbServer {
 
     static byte[] message;
     public static void main(String[] args) throws IOException, InterruptedException {
-        UmbServer server = new UmbServer(args);
+        UmbServer3 server = new UmbServer3(args);
     }
 
 
     static void testMain(String[] args) {
         try {
-            UmbServer server1 = new UmbServer("id 1".split(" "));
-            UmbServer server2 = new UmbServer("id 2".split(" "));
-            UmbServer server3 = new UmbServer("id 3".split(" "));
+            UmbServer3 server1 = new UmbServer3("id 1".split(" "));
+            UmbServer3 server2 = new UmbServer3("id 2".split(" "));
+            UmbServer3 server3 = new UmbServer3("id 3".split(" "));
 
             Random random = new Random();
             Utils.LatencyTimer t = new Utils.LatencyTimer();

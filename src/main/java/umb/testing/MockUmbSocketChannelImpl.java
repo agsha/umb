@@ -35,6 +35,18 @@ public class MockUmbSocketChannelImpl implements UmbSocketChannel {
     }
 
     @Override
+    public long write(ByteBuffer b) throws IOException {
+        int sum = 0;
+        for(int j=0; j< b.array().length; j++) {
+            sum+=b.array()[j];
+        }
+        if(sum==Integer.MAX_VALUE) {
+            log.debug("unlucky");
+        }
+        return b.limit();
+    }
+
+    @Override
     public int read(ByteBuffer dst) throws IOException {
         dst.put((byte)1);
         return 1;

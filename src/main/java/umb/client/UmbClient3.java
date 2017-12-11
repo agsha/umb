@@ -9,6 +9,7 @@ import com.google.inject.util.Modules;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import sha.Utils;
+import umb.common.Helper3;
 import umb.common.UmbSocketChannel;
 import umb.guice.UmbInjector;
 import umb.guice.UmbModule;
@@ -24,8 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static umb.common.Helper.IpPort;
 
-public class UmbClient2 {
-    private static final Logger log = LoggerFactory.getLogger(UmbClient2.class);
+public class UmbClient3 {
+    private static final Logger log = LoggerFactory.getLogger(UmbClient3.class);
     private final int connections;
     JsonNode config;
 
@@ -34,7 +35,7 @@ public class UmbClient2 {
     public static final int batchSize = 1024; // network batch size
     volatile boolean shutdown = false;
     AtomicInteger messageId = new AtomicInteger();
-    public UmbClient2(int connections, String conf) throws InterruptedException {
+    public UmbClient3(int connections, String conf) throws InterruptedException {
         config = Utils.readJsonFromClasspath(conf, JsonNode.class);
         this.connections = connections;
         // keep the queue length small to avoid queueing delays
@@ -87,32 +88,17 @@ public class UmbClient2 {
     }
 
 
-    public void produce(int topic, byte[] ba) throws InterruptedException, IOException {
+    public void produce(int topic, ByteBuffer b, ByteBuffer ack) throws InterruptedException, IOException {
         UmbSocketChannel socketChannel = socketChannels.take();
         long id = messageId.incrementAndGet();
-        UmbFuture f = new UmbFuture();
-        UmbMessage message = new UmbMessage(ba, f);
-//        if(ba.length < batchSize / 2) {
-//            smallMessage(ba);
-//        }
-
-        ByteBuffer header = ByteBuffer.allocate(8);
-        ByteBuffer ack = ByteBuffer.allocate(1);
-
-        // 8 byte message id + 4 bytes message length
-        header.clear();
-        header.putInt(0, topic);
-        header.putInt(4, message.payload.length);
-        ByteBuffer[] toSend = new ByteBuffer[2];
-        toSend[0] = header;
-        toSend[1] = ByteBuffer.wrap(message.payload);
-//        log.debug("before write");
-        //TODO, put the remaining count here.
-        socketChannel.write(toSend, 0, 2);
-//        log.debug("after write");
-
         ack.clear();
-        ack.put(0, (byte)0);
+        b.clear();
+
+        while(b.remaining() > 0) {
+            socketChannel.write(b);
+        }
+
+
         while(ack.remaining() > 0) {
             socketChannel.read(ack);
         }
@@ -129,42 +115,10 @@ public class UmbClient2 {
     }
 
 
-    public static class UmbFuture implements Future<Void> {
-        CountDownLatch latch = new CountDownLatch(1);
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            return false;
-        }
-
-        @Override
-        public boolean isCancelled() {
-            return false;
-        }
-
-        @Override
-        public boolean isDone() {
-            return latch.getCount() == 0;
-        }
-
-        @Override
-        public Void get() throws InterruptedException, ExecutionException {
-            latch.await();
-            return null;
-        }
-
-        @Override
-        public Void get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
-            latch.await(timeout, unit);
-            return null;
-        }
-    }
-
 
     public static class UmbMessage {
         byte[] payload;
-
-
-        public UmbMessage(byte[] payload, UmbFuture f) {
+        public UmbMessage(byte[] payload) {
             this.payload = payload;
         }
     }
@@ -175,10 +129,30 @@ public class UmbClient2 {
      */
     public static void main(String[] args) {
         realMain(args);
-//        test1(args);
+//        testMain(args);
     }
 
     static void realMain(String[] args) {
+        doMain(args, UmbInjector.injector);
+    }
+
+    /**
+     * results of the test: max:612.48us 99.9%:36us 99.0%:20us 95.0%:11us 90.0%:10us 75.0%:10us 50.0%:9us 1.0%:9us  count:107000
+     * @throws InterruptedException
+     * @throws ExecutionException
+     */
+    static void testMain(String[] args) {
+        class MyModule extends UmbModule {
+            @Override
+            protected void configure() {
+                bind(UmbSocketChannel.class).to(MockUmbSocketChannelImpl.class);
+            }
+        }
+        Injector injector = Guice.createInjector(Modules.override(new UmbModule()).with(new MyModule()));
+        doMain(args, injector);
+    }
+
+    public static void doMain(String[] args, Injector injector) {
         int conn = 1;
         int topic = 1;
         String conf = "config.json";
@@ -196,9 +170,11 @@ public class UmbClient2 {
             }
             ii+=2;
         }
+        UmbInjector.injector = injector;
+        System.out.println(UmbInjector.injector.getInstance(UmbSocketChannel.class));
 
         try {
-            UmbClient2 client = new UmbClient2(conn, conf);
+            UmbClient3 client = new UmbClient3(conn, conf);
             Random random = new Random();
             Utils.LatencyTimer t = new Utils.LatencyTimer();
             int c = 0;
@@ -211,12 +187,15 @@ public class UmbClient2 {
             for (int i = 0; i < conn; i++) {
                 int finalTopic = topic;
                 int finalMsg = msg;
+                int finalMsg1 = msg;
                 Thread tt = new Thread(new Runnable() {
                     @Override
                     public void run() {
                         while (true) {
+                            ByteBuffer b = ByteBuffer.allocate(finalMsg1);
+                            ByteBuffer ack = ByteBuffer.allocate(Helper3.ACK_SZ);
                             try {
-                                client.produce(finalTopic, b);
+                                client.produce(finalTopic, b, ack);
                             } catch (InterruptedException | IOException e) {
                                 e.printStackTrace();
                             }
@@ -238,80 +217,5 @@ public class UmbClient2 {
             e.printStackTrace();
         }
         System.exit(0);
-    }
-
-    /**
-     * results of the test: max:612.48us 99.9%:36us 99.0%:20us 95.0%:11us 90.0%:10us 75.0%:10us 50.0%:9us 1.0%:9us  count:107000
-     * @throws InterruptedException
-     * @throws ExecutionException
-     */
-    public static void test1(String[] args) {
-        try {
-            int conn = 1;
-            String conf = "config.json";
-            int ii = 0;
-            while(ii < args.length) {
-                if(args[ii].equals("conn")) {
-                    conn = Integer.parseInt(args[ii+1]);
-                } else if(args[ii].equals("conf")) {
-                    conf = args[ii+1];
-                }
-                ii+=2;
-            }
-            conn = 1;
-
-            class MyModule extends UmbModule {
-                @Override
-                protected void configure() {
-                    bind(UmbSocketChannel.class).to(MockUmbSocketChannelImpl.class);
-                }
-            }
-            Injector injector = Guice.createInjector(Modules.override(new UmbModule()).with(new MyModule()));
-            UmbInjector.injector = injector;
-            System.out.println(UmbInjector.injector.getInstance(UmbSocketChannel.class));
-
-            try {
-                UmbClient2 client = new UmbClient2(conn, conf);
-                Random random = new Random();
-                Utils.LatencyTimer t = new Utils.LatencyTimer();
-                Utils.Timer trpt = new Utils.Timer("umb");
-                int c = 0;
-                int len = 1*1024;
-                byte[]b =  new byte[len];
-                for(int j=0; j<b.length; j++) {
-                    b[j] = (byte)random.nextInt();
-                }
-
-                for (int i = 0; i < conn; i++) {
-                    Thread tt = new Thread(new Runnable() {
-                        @Override
-                        public void run() {
-                            while (true) {
-                                try {
-                                    client.produce(1, b);
-                                } catch (InterruptedException | IOException e) {
-                                    e.printStackTrace();
-                                }
-                                t.count();
-                                trpt.count(len);
-                            }
-                        }
-                    });
-                    tt.start();
-                }
-
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-
-            try {
-                Thread.sleep(60_000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-            System.exit(0);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
     }
 }

@@ -9,6 +9,8 @@ public interface UmbSocketChannel {
 
     long write(ByteBuffer[] srcs, int offset, int length)
             throws IOException;
+    long write(ByteBuffer b)
+            throws IOException;
 
     int read(ByteBuffer dst) throws IOException;
 

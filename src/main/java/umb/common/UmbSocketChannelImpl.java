@@ -23,6 +23,11 @@ public class UmbSocketChannelImpl implements UmbSocketChannel{
     }
 
     @Override
+    public long write(ByteBuffer b) throws IOException {
+        return socketChannel.write(b);
+    }
+
+    @Override
     public int read(ByteBuffer dst) throws IOException {
         return socketChannel.read(dst);
     }
